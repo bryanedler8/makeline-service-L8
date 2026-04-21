@@ -1,62 +1,77 @@
 package main
 
 import (
-	"log"
-	"net/http"
-	"os"
-	"strconv"
+    "log"
+    "net/http"
+    "os"
+    // "strconv"
+    "time"  // Make sure this import is present
 
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
+    "github.com/gin-contrib/cors"
+    "github.com/gin-gonic/gin"
 )
 
 // Valid database API types
 const (
-	AZURE_COSMOS_DB_SQL_API = "cosmosdbsql"
+    AZURE_COSMOS_DB_SQL_API = "cosmosdbsql"
 )
 
 func main() {
-	var orderService *OrderService
+    var orderService *OrderService
 
-	// Get the database API type
-	apiType := os.Getenv("ORDER_DB_API")
-	switch apiType {
-	case "cosmosdbsql":
-		log.Printf("Using Azure CosmosDB SQL API")
-	default:
-		log.Printf("Using MongoDB API")
-	}
+    // Get the database API type
+    apiType := os.Getenv("ORDER_DB_API")
+    switch apiType {
+    case "cosmosdbsql":
+        log.Printf("Using Azure CosmosDB SQL API")
+    default:
+        log.Printf("Using MongoDB API")
+    }
 
-	// Initialize the database
-	orderService, err := initDatabase(apiType)
-	if err != nil {
-		log.Printf("Failed to initialize database: %s", err)
-		os.Exit(1)
-	}
+    // Initialize the database
+    orderService, err := initDatabase(apiType)
+    if err != nil {
+        log.Printf("Failed to initialize database: %s", err)
+        os.Exit(1)
+    }
 
-	router := gin.Default()
-	router.Use(cors.Default())
-	router.Use(OrderMiddleware(orderService))
-	router.GET("/order/fetch", fetchOrders)
-	router.GET("/order/:id", getOrder)
-	router.PUT("/order", updateOrder)
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"version": os.Getenv("APP_VERSION"),
-		})
-	})
-	router.Run(":3001")
+    router := gin.Default()
+    router.Use(cors.Default())
+    router.Use(OrderMiddleware(orderService))
+    router.GET("/order/fetch", fetchOrders)
+    router.GET("/order/:id", getOrder)
+    router.PUT("/order", updateOrder)
+    router.GET("/health", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{
+            "status":  "ok",
+            "version": os.Getenv("APP_VERSION"),
+            "service": "makeline-service",
+        })
+    })
+    router.GET("/", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{
+            "service":    "Best Buy Makeline Service",
+            "version":    os.Getenv("APP_VERSION"),
+            "description": "Background order processor for Best Buy electronics",
+        })
+    })
+    
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "3004"
+    }
+    
+    log.Printf("Makeline Service starting on port %s", port)
+    router.Run(":" + port)
 }
 
 // OrderMiddleware is a middleware function that injects the order service into the request context
 func OrderMiddleware(orderService *OrderService) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set("orderService", orderService)
-		c.Next()
-	}
+    return func(c *gin.Context) {
+        c.Set("orderService", orderService)
+        c.Next()
+    }
 }
-
 
 // Fetches orders from the order queue and stores them in database
 func fetchOrders(c *gin.Context) {
@@ -75,169 +90,149 @@ func fetchOrders(c *gin.Context) {
         return
     }
 
-    // Process each order (validate inventory, update stock)
-    for i, order := range orders {
-        // Process order items
-        for _, item := range order.Items {
-            log.Printf("Processing item: Product %d, Quantity %d", item.ProductID, item.Quantity)
-            // Here you would call Product Service to validate and update inventory
+    // Process each order - set initial status
+    for i := range orders {
+        if orders[i].CreatedAt.IsZero() {
+            orders[i].CreatedAt = time.Now()
         }
-        
-        // Update order status
-        orders[i].Status = Processing
         orders[i].UpdatedAt = time.Now()
+        if orders[i].Status == 0 { // Pending is 0
+            orders[i].Status = Pending
+        }
+        log.Printf("Processing order: %s with %d items", orders[i].OrderID, len(orders[i].Items))
     }
 
     // Save orders to database
-    err = client.repo.InsertOrders(orders)
-    if err != nil {
-        log.Printf("Failed to save orders to database: %s", err)
-        c.AbortWithStatus(http.StatusInternalServerError)
-        return
+    if len(orders) > 0 {
+        err = client.repo.InsertOrders(orders)
+        if err != nil {
+            log.Printf("Failed to save orders to database: %s", err)
+            c.AbortWithStatus(http.StatusInternalServerError)
+            return
+        }
+        log.Printf("Saved %d orders to database", len(orders))
     }
 
-    // Return the orders to be processed
-    orders, err = client.repo.GetPendingOrders()
+    // Return the pending orders
+    pendingOrders, err := client.repo.GetPendingOrders()
     if err != nil {
         log.Printf("Failed to get pending orders from database: %s", err)
         c.AbortWithStatus(http.StatusInternalServerError)
         return
     }
 
-    c.IndentedJSON(http.StatusOK, orders)
+    c.IndentedJSON(http.StatusOK, pendingOrders)
 }
 
 // Gets a single order from database by order ID
 func getOrder(c *gin.Context) {
-	client, ok := c.MustGet("orderService").(*OrderService)
-	if !ok {
-		log.Printf("Failed to get order service")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    client, ok := c.MustGet("orderService").(*OrderService)
+    if !ok {
+        log.Printf("Failed to get order service")
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		log.Printf("Failed to convert order id to int: %s", err)
-		c.AbortWithStatus(http.StatusBadRequest)
-		return
-	}
+    id := c.Param("id")
 
-	sanitizedOrderId := strconv.FormatInt(int64(id), 10)
+    order, err := client.repo.GetOrder(id)
+    if err != nil {
+        log.Printf("Failed to get order from database: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	order, err := client.repo.GetOrder(sanitizedOrderId)
-	if err != nil {
-		log.Printf("Failed to get order from database: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	c.IndentedJSON(http.StatusOK, order)
+    c.IndentedJSON(http.StatusOK, order)
 }
 
 // Updates the status of an order
 func updateOrder(c *gin.Context) {
-	client, ok := c.MustGet("orderService").(*OrderService)
-	if !ok {
-		log.Printf("Failed to get order service")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    client, ok := c.MustGet("orderService").(*OrderService)
+    if !ok {
+        log.Printf("Failed to get order service")
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	// unmarsal the order from the request body
-	var order Order
-	if err := c.BindJSON(&order); err != nil {
-		log.Printf("Failed to unmarshal order: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    // unmarshal the order from the request body
+    var order Order
+    if err := c.BindJSON(&order); err != nil {
+        log.Printf("Failed to unmarshal order: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	id, err := strconv.Atoi(order.OrderID)
-	if err != nil {
-		log.Printf("Failed to convert order id to int: %s", err)
-		c.AbortWithStatus(http.StatusBadRequest)
-		return
-	}
+    order.UpdatedAt = time.Now()
+    
+    err := client.repo.UpdateOrder(order)
+    if err != nil {
+        log.Printf("Failed to update order status: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	sanitizedOrderId := strconv.FormatInt(int64(id), 10)
-
-	sanitizedOrder := Order{
-		OrderID:    sanitizedOrderId,
-		CustomerID: order.CustomerID,
-		Items:      order.Items,
-		Status:     order.Status,
-	}
-
-	err = client.repo.UpdateOrder(sanitizedOrder)
-	if err != nil {
-		log.Printf("Failed to update order status: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	c.SetAccepted("202")
+    c.Status(http.StatusAccepted)
 }
 
 // Gets an environment variable or exits if it is not set
 func getEnvVar(varName string, fallbackVarNames ...string) string {
-	value := os.Getenv(varName)
-	if value == "" {
-		for _, fallbackVarName := range fallbackVarNames {
-			value = os.Getenv(fallbackVarName)
-			if value == "" {
-				break
-			}
-		}
-		if value == "" {
-			log.Printf("%s is not set", varName)
-			if len(fallbackVarNames) > 0 {
-				log.Printf("Tried fallback variables: %v", fallbackVarNames)
-			}
-			os.Exit(1)
-		}
-	}
-	return value
+    value := os.Getenv(varName)
+    if value == "" {
+        for _, fallbackVarName := range fallbackVarNames {
+            value = os.Getenv(fallbackVarName)
+            if value != "" {
+                break
+            }
+        }
+        if value == "" {
+            log.Printf("%s is not set", varName)
+            if len(fallbackVarNames) > 0 {
+                log.Printf("Tried fallback variables: %v", fallbackVarNames)
+            }
+            os.Exit(1)
+        }
+    }
+    return value
 }
 
 // Initializes the database based on the API type
 func initDatabase(apiType string) (*OrderService, error) {
-	dbURI := getEnvVar("AZURE_COSMOS_RESOURCEENDPOINT", "ORDER_DB_URI")
-	dbName := getEnvVar("ORDER_DB_NAME")
+    dbURI := getEnvVar("AZURE_COSMOS_RESOURCEENDPOINT", "ORDER_DB_URI")
+    dbName := getEnvVar("ORDER_DB_NAME")
 
-	switch apiType {
-	case AZURE_COSMOS_DB_SQL_API:
-		containerName := getEnvVar("ORDER_DB_CONTAINER_NAME")
-		dbPartitionKey := getEnvVar("ORDER_DB_PARTITION_KEY")
-		dbPartitionValue := getEnvVar("ORDER_DB_PARTITION_VALUE")
+    switch apiType {
+    case AZURE_COSMOS_DB_SQL_API:
+        containerName := getEnvVar("ORDER_DB_CONTAINER_NAME")
+        dbPartitionKey := getEnvVar("ORDER_DB_PARTITION_KEY")
+        dbPartitionValue := getEnvVar("ORDER_DB_PARTITION_VALUE")
 
-		// check if USE_WORKLOAD_IDENTITY_AUTH is set
-		useWorkloadIdentityAuth := os.Getenv("USE_WORKLOAD_IDENTITY_AUTH")
-		if useWorkloadIdentityAuth == "" {
-			useWorkloadIdentityAuth = "false"
-		}
+        useWorkloadIdentityAuth := os.Getenv("USE_WORKLOAD_IDENTITY_AUTH")
+        if useWorkloadIdentityAuth == "" {
+            useWorkloadIdentityAuth = "false"
+        }
 
-		if useWorkloadIdentityAuth == "true" {
-			cosmosRepo, err := NewCosmosDBOrderRepoWithManagedIdentity(dbURI, dbName, containerName, PartitionKey{dbPartitionKey, dbPartitionValue})
-			if err != nil {
-				return nil, err
-			}
-			return NewOrderService(cosmosRepo), nil
-		} else {
-			dbPassword := os.Getenv("ORDER_DB_PASSWORD")
-			cosmosRepo, err := NewCosmosDBOrderRepo(dbURI, dbName, containerName, dbPassword, PartitionKey{dbPartitionKey, dbPartitionValue})
-			if err != nil {
-				return nil, err
-			}
-			return NewOrderService(cosmosRepo), nil
-		}
-	default:
-		collectionName := getEnvVar("ORDER_DB_COLLECTION_NAME")
-		dbUsername := os.Getenv("ORDER_DB_USERNAME")
-		dbPassword := os.Getenv("ORDER_DB_PASSWORD")
-		mongoRepo, err := NewMongoDBOrderRepo(dbURI, dbName, collectionName, dbUsername, dbPassword)
-		if err != nil {
-			return nil, err
-		}
-		return NewOrderService(mongoRepo), nil
-	}
+        if useWorkloadIdentityAuth == "true" {
+            cosmosRepo, err := NewCosmosDBOrderRepoWithManagedIdentity(dbURI, dbName, containerName, PartitionKey{dbPartitionKey, dbPartitionValue})
+            if err != nil {
+                return nil, err
+            }
+            return NewOrderService(cosmosRepo), nil
+        } else {
+            dbPassword := os.Getenv("ORDER_DB_PASSWORD")
+            cosmosRepo, err := NewCosmosDBOrderRepo(dbURI, dbName, containerName, dbPassword, PartitionKey{dbPartitionKey, dbPartitionValue})
+            if err != nil {
+                return nil, err
+            }
+            return NewOrderService(cosmosRepo), nil
+        }
+    default:
+        collectionName := getEnvVar("ORDER_DB_COLLECTION_NAME")
+        dbUsername := os.Getenv("ORDER_DB_USERNAME")
+        dbPassword := os.Getenv("ORDER_DB_PASSWORD")
+        mongoRepo, err := NewMongoDBOrderRepo(dbURI, dbName, collectionName, dbUsername, dbPassword)
+        if err != nil {
+            return nil, err
+        }
+        return NewOrderService(mongoRepo), nil
+    }
 }
