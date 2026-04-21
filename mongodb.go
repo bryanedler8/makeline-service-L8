@@ -84,20 +84,26 @@ func (r *MongoDBOrderRepo) GetPendingOrders() ([]Order, error) {
 }
 
 func (r *MongoDBOrderRepo) GetOrder(id string) (Order, error) {
-	var ctx = context.TODO()
+    var ctx = context.TODO()
 
-	filter := bson.D{{Key: "orderid", Value: bson.D{{Key: "$eq", Value: id}}}}
+    // Try both orderId and _id formats
+    filter := bson.D{
+        {Key: "$or", Value: bson.A{
+            bson.D{{Key: "orderId", Value: bson.D{{Key: "$eq", Value: id}}}},
+            bson.D{{Key: "_id", Value: bson.D{{Key: "$eq", Value: id}}}},
+        }},
+    }
 
-	singleResult := r.db.FindOne(ctx, filter)
+    singleResult := r.db.FindOne(ctx, filter)
 
-	var order Order
-	err := singleResult.Decode(&order)
-	if err != nil {
-		log.Printf("Failed to decode order: %s", err)
-		return order, err
-	}
+    var order Order
+    err := singleResult.Decode(&order)
+    if err != nil {
+        log.Printf("Failed to decode order: %s", err)
+        return order, err
+    }
 
-	return order, nil
+    return order, nil
 }
 
 func (r *MongoDBOrderRepo) InsertOrders(orders []Order) error {

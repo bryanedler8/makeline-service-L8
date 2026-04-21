@@ -57,40 +57,54 @@ func OrderMiddleware(orderService *OrderService) gin.HandlerFunc {
 	}
 }
 
+
 // Fetches orders from the order queue and stores them in database
 func fetchOrders(c *gin.Context) {
-	client, ok := c.MustGet("orderService").(*OrderService)
-	if !ok {
-		log.Printf("Failed to get order service")
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    client, ok := c.MustGet("orderService").(*OrderService)
+    if !ok {
+        log.Printf("Failed to get order service")
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	// Get orders from the queue
-	orders, err := getOrdersFromQueue()
-	if err != nil {
-		log.Printf("Failed to fetch orders from queue: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    // Get orders from the queue
+    orders, err := getOrdersFromQueue()
+    if err != nil {
+        log.Printf("Failed to fetch orders from queue: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	// Save orders to database
-	err = client.repo.InsertOrders(orders)
-	if err != nil {
-		log.Printf("Failed to save orders to database: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    // Process each order (validate inventory, update stock)
+    for i, order := range orders {
+        // Process order items
+        for _, item := range order.Items {
+            log.Printf("Processing item: Product %d, Quantity %d", item.ProductID, item.Quantity)
+            // Here you would call Product Service to validate and update inventory
+        }
+        
+        // Update order status
+        orders[i].Status = Processing
+        orders[i].UpdatedAt = time.Now()
+    }
 
-	// Return the orders to be processed
-	orders, err = client.repo.GetPendingOrders()
-	if err != nil {
-		log.Printf("Failed to get pending orders from database: %s", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+    // Save orders to database
+    err = client.repo.InsertOrders(orders)
+    if err != nil {
+        log.Printf("Failed to save orders to database: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
 
-	c.IndentedJSON(http.StatusOK, orders)
+    // Return the orders to be processed
+    orders, err = client.repo.GetPendingOrders()
+    if err != nil {
+        log.Printf("Failed to get pending orders from database: %s", err)
+        c.AbortWithStatus(http.StatusInternalServerError)
+        return
+    }
+
+    c.IndentedJSON(http.StatusOK, orders)
 }
 
 // Gets a single order from database by order ID

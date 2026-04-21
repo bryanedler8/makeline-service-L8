@@ -197,3 +197,26 @@ func unmarshalOrderFromQueue(data []byte) (Order, error) {
 
 	return order, nil
 }
+// Added this function to properly unmarshal Best Buy orders
+func unmarshalBestBuyOrderFromQueue(data []byte) (Order, error) {
+    var order Order
+    
+    // First try to unmarshal as Best Buy order format
+    err := json.Unmarshal(data, &order)
+    if err != nil {
+        log.Printf("failed to unmarshal order: %v\n", err)
+        return Order{}, err
+    }
+    
+    // If OrderID is empty or doesn't have BBY prefix, generate one
+    if order.OrderID == "" {
+        order.OrderID = fmt.Sprintf("BBY-%d", time.Now().UnixNano())
+    }
+    
+    // Set status to pending
+    order.Status = Pending
+    order.CreatedAt = time.Now()
+    order.UpdatedAt = time.Now()
+    
+    return order, nil
+}
